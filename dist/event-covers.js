@@ -4,9 +4,10 @@ exports.coverImageTypes = exports.maxCoverImageBytes = void 0;
 exports.isAllowedCoverImageType = isAllowedCoverImageType;
 exports.isOwnedCoverImageKey = isOwnedCoverImageKey;
 exports.matchesImageSignature = matchesImageSignature;
-exports.maxCoverImageBytes = 5 * 1024 * 1024;
+exports.maxCoverImageBytes = 20 * 1024 * 1024;
 exports.coverImageTypes = {
     "image/jpeg": "jpg",
+    "image/jpg": "jpg",
     "image/png": "png",
     "image/webp": "webp",
 };
@@ -18,7 +19,7 @@ function isOwnedCoverImageKey(key, userId) {
         /^[A-Za-z0-9_-]+\/[a-f0-9-]{36}\.(jpg|png|webp)$/i.test(key));
 }
 function matchesImageSignature(bytes, contentType) {
-    if (contentType === "image/jpeg")
+    if ((contentType === "image/jpeg" || contentType === "image/jpg"))
         return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
     if (contentType === "image/png")
         return (bytes.length >= 8 &&

@@ -1,7 +1,8 @@
-export const maxCoverImageBytes = 5 * 1024 * 1024;
+export const maxCoverImageBytes = 20 * 1024 * 1024;
 
 export const coverImageTypes = {
   "image/jpeg": "jpg",
+  "image/jpg": "jpg",
   "image/png": "png",
   "image/webp": "webp",
 } as const;
@@ -23,7 +24,7 @@ export function matchesImageSignature(
   bytes: Uint8Array,
   contentType: string,
 ): boolean {
-  if (contentType === "image/jpeg")
+  if ((contentType === "image/jpeg" || contentType === "image/jpg"))
     return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
   if (contentType === "image/png")
     return (

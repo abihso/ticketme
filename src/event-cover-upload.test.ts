@@ -61,6 +61,17 @@ describe("API cover upload", () => {
     assert.equal(saved.length, count);
   });
 
+  it("accepts JPG files with standard and alternate MIME types above the old 5 MB limit", async () => {
+    const bytes = Buffer.alloc(6 * 1024 * 1024);
+    Buffer.from([0xff, 0xd8, 0xff]).copy(bytes);
+    for (const type of ["image/jpeg", "image/jpg"]) {
+      const response = await upload(bytes, type);
+      assert.equal(response.status, 201);
+      await response.json();
+      assert.equal(saved.at(-1)?.bytes.length, bytes.length);
+    }
+  });
+
   it("accepts an image exactly at the documented size limit", async () => {
     const bytes = Buffer.alloc(maxCoverImageBytes);
     png.copy(bytes);

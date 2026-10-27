@@ -20,7 +20,7 @@ export function createCoverUploadRouter(options: {
         return;
       }
       if (!isAllowedCoverImageType(request.get("content-type") ?? "")) {
-        response.status(415).json({ error: "Choose a JPEG, PNG, or WebP image." });
+        response.status(415).json({ error: "Choose a JPG/JPEG, PNG, or WebP image." });
         return;
       }
       next();
@@ -28,13 +28,14 @@ export function createCoverUploadRouter(options: {
     express.raw({ type: () => true, limit: maxCoverImageBytes, inflate: false }),
     async (request, response) => {
       const bytes = request.body;
-      const contentType = request.get("content-type")!;
+      const declaredType = request.get("content-type")!;
+      const contentType = declaredType === "image/jpg" ? "image/jpeg" : declaredType;
       if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
         response.status(400).json({ error: "Choose a non-empty cover image." });
         return;
       }
       if (!matchesImageSignature(bytes, contentType)) {
-        response.status(400).json({ error: "The file does not match its image type. Choose a JPEG, PNG, or WebP image." });
+        response.status(400).json({ error: "The file does not match its image type. Choose a JPG/JPEG, PNG, or WebP image." });
         return;
       }
       try {
@@ -48,7 +49,7 @@ export function createCoverUploadRouter(options: {
   );
   const handleUploadError: ErrorRequestHandler = (error, _request, response, next) => {
     if (error.type === "entity.too.large") {
-      response.status(413).json({ error: "Cover image must be 5 MB or smaller." });
+      response.status(413).json({ error: "Cover image must be 20 MB or smaller." });
       return;
     }
     if (error.type === "encoding.unsupported") {

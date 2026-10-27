@@ -9,7 +9,8 @@ const express_1 = __importDefault(require("express"));
 const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
 const client_s3_1 = require("@aws-sdk/client-s3");
 const s3_presigned_post_1 = require("@aws-sdk/s3-presigned-post");
-const s3_request_presigner_1 = require("@aws-sdk/s3-request-presigner");
+const node_stream_1 = require("node:stream");
+const event_cover_read_js_1 = require("./event-cover-read.js");
 const drizzle_orm_1 = require("drizzle-orm");
 const node_crypto_1 = require("node:crypto");
 const node_util_1 = require("node:util");
@@ -63,10 +64,11 @@ const coverUploadLimiter = (0, express_rate_limit_1.default)({
     legacyHeaders: false,
     message: { error: "Too many image uploads. Try again later." },
 });
-async function signCoverImage(key) {
+function coverImageUrl(request, key) {
     if (!key || !s3Bucket)
         return null;
-    return (0, s3_request_presigner_1.getSignedUrl)(s3Client, new client_s3_1.GetObjectCommand({ Bucket: s3Bucket, Key: key }), { expiresIn: 15 * 60 });
+    const origin = process.env.PUBLIC_API_URL || `${request.protocol}://${request.get("host")}`;
+    return (0, event_cover_read_js_1.publicCoverImageUrl)(origin, key);
 }
 async function verifyCoverImageKey(key, userId) {
     if (!s3Bucket || !awsRegion || !(0, event_covers_js_1.isOwnedCoverImageKey)(key, userId))
@@ -462,6 +464,21 @@ app.post("/api/payments/webhook", express_1.default.raw({ type: "application/jso
     response.sendStatus(200);
 }));
 app.use(express_1.default.json({ limit: "32kb" }));
+// Saved event covers are public; storage credentials and upload routes stay private.
+app.use("/api/event-covers", (0, event_cover_read_js_1.createCoverReadRouter)({
+    configured: Boolean(s3Bucket && awsRegion),
+    isSaved: async (key) => {
+        const [event] = await db_js_1.db.select({ id: schema_js_1.events.id }).from(schema_js_1.events)
+            .where((0, drizzle_orm_1.eq)(schema_js_1.events.coverImageKey, key)).limit(1);
+        return Boolean(event);
+    },
+    load: async (key) => {
+        const image = await s3Client.send(new client_s3_1.GetObjectCommand({ Bucket: s3Bucket, Key: key }));
+        if (!(image.Body instanceof node_stream_1.Readable))
+            throw new Error("Missing image body");
+        return { body: image.Body, contentType: image.ContentType ?? "", contentLength: image.ContentLength };
+    },
+}));
 app.get("/api/health", (_request, response) => response.json({ status: "ok" }));
 const credentialsSchema = zod_1.z.object({
     email: zod_1.z
@@ -933,7 +950,7 @@ app.get("/api/me/favorites", authenticate, asyncRoute(async (request, response) 
         const { coverImageKey, ...savedEvent } = event;
         return {
             ...savedEvent,
-            coverImageUrl: await signCoverImage(coverImageKey),
+            coverImageUrl: coverImageUrl(request, coverImageKey),
         };
     })));
 }));
@@ -1024,7 +1041,7 @@ app.get("/api/events", asyncRoute(async (request, response) => {
         const { coverImageKey, ...publicEvent } = event;
         return {
             ...publicEvent,
-            coverImageUrl: await signCoverImage(coverImageKey),
+            coverImageUrl: coverImageUrl(request, coverImageKey),
         };
     })));
 }));
@@ -1060,7 +1077,7 @@ app.get("/api/events/:eventId", asyncRoute(async (request, response) => {
     const { coverImageKey, ...publicEvent } = event;
     response.json({
         ...publicEvent,
-        coverImageUrl: await signCoverImage(coverImageKey),
+        coverImageUrl: coverImageUrl(request, coverImageKey),
         organizerName: organizer?.name ?? null,
         ticketTypes: types.map(({ quantity, sold, reserved, ...type }) => ({
             ...type,
@@ -1192,12 +1209,12 @@ app.use("/api/admin/event-covers/content", ...organizerOnly, coverUploadLimiter,
     },
 }));
 const coverUploadInput = zod_1.z.object({
-    contentType: zod_1.z.enum(["image/jpeg", "image/png", "image/webp"]),
+    contentType: zod_1.z.enum(["image/jpeg", "image/jpg", "image/png", "image/webp"]),
 });
 app.post("/api/admin/event-covers/upload", ...organizerOnly, coverUploadLimiter, asyncRoute(async (request, response) => {
     const parsed = coverUploadInput.safeParse(request.body);
     if (!parsed.success) {
-        response.status(400).json({ error: "Choose a JPEG, PNG, or WebP image" });
+        response.status(400).json({ error: "Choose a JPG/JPEG, PNG, or WebP image" });
         return;
     }
     if (!s3Bucket || !awsRegion) {
@@ -1207,16 +1224,17 @@ app.post("/api/admin/event-covers/upload", ...organizerOnly, coverUploadLimiter,
         return;
     }
     const { userId } = request.auth;
-    const extension = event_covers_js_1.coverImageTypes[parsed.data.contentType];
+    const contentType = parsed.data.contentType === "image/jpg" ? "image/jpeg" : parsed.data.contentType;
+    const extension = event_covers_js_1.coverImageTypes[contentType];
     const key = `${userId}/${(0, node_crypto_1.randomUUID)()}.${extension}`;
     const upload = await (0, s3_presigned_post_1.createPresignedPost)(s3Client, {
         Bucket: s3Bucket,
         Key: key,
         Expires: 300,
-        Fields: { "Content-Type": parsed.data.contentType },
+        Fields: { "Content-Type": contentType },
         Conditions: [
             ["content-length-range", 1, event_covers_js_1.maxCoverImageBytes],
-            ["eq", "$Content-Type", parsed.data.contentType],
+            ["eq", "$Content-Type", contentType],
             ["eq", "$key", key],
         ],
     });
@@ -1238,7 +1256,7 @@ app.get("/api/admin/events", ...organizerOnly, asyncRoute(async (request, respon
         : [];
     response.json(await Promise.all(eventRows.map(async (event) => ({
         ...event,
-        coverImageUrl: await signCoverImage(event.coverImageKey),
+        coverImageUrl: coverImageUrl(request, event.coverImageKey),
         ticketTypes: types.filter((type) => type.eventId === event.id),
     }))));
 }));
@@ -1286,7 +1304,7 @@ app.post("/api/admin/events", ...eventOwnerOnly, asyncRoute(async (request, resp
     });
     response.status(201).json({
         ...created,
-        coverImageUrl: await signCoverImage(created.coverImageKey),
+        coverImageUrl: coverImageUrl(request, created.coverImageKey),
     });
 }));
 app.put("/api/admin/events/:eventId", ...organizerOnly, asyncRoute(async (request, response) => {
@@ -1395,7 +1413,7 @@ app.put("/api/admin/events/:eventId", ...organizerOnly, asyncRoute(async (reques
     }
     response.json({
         ...updated.event,
-        coverImageUrl: await signCoverImage(updated.event.coverImageKey),
+        coverImageUrl: coverImageUrl(request, updated.event.coverImageKey),
     });
 }));
 app.delete("/api/admin/events/:eventId", ...organizerOnly, asyncRoute(async (request, response) => {

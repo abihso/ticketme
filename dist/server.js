@@ -20,8 +20,10 @@ const zod_1 = require("zod");
 const refund_status_js_1 = require("./refund-status.js");
 const check_in_status_js_1 = require("./check-in-status.js");
 const event_cover_upload_js_1 = require("./event-cover-upload.js");
+const proxy_config_js_1 = require("./proxy-config.js");
 const event_covers_js_1 = require("./event-covers.js");
 const app = (0, express_1.default)();
+(0, proxy_config_js_1.configureProxy)(app);
 const port = Number(process.env.PORT ?? 4000);
 const awsRegion = process.env.AWS_REGION;
 const s3Bucket = process.env.AWS_S3_BUCKET;
@@ -67,7 +69,7 @@ const coverUploadLimiter = (0, express_rate_limit_1.default)({
 function coverImageUrl(request, key) {
     if (!key || !s3Bucket)
         return null;
-    const origin = process.env.PUBLIC_API_URL || `${request.protocol}://${request.get("host")}`;
+    const origin = process.env.PUBLIC_API_URL || process.env.RENDER_EXTERNAL_URL || `${request.protocol}://${request.get("host")}`;
     return (0, event_cover_read_js_1.publicCoverImageUrl)(origin, key);
 }
 async function verifyCoverImageKey(key, userId) {

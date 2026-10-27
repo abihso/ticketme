@@ -64,6 +64,7 @@ import { z } from "zod";
 import { canReviewRefundStatus } from "./refund-status.js";
 import { canTransitionCheckIn } from "./check-in-status.js";
 import { createCoverUploadRouter } from "./event-cover-upload.js";
+import { configureProxy } from "./proxy-config.js";
 import {
   coverImageTypes,
   isAllowedCoverImageType,
@@ -73,6 +74,7 @@ import {
 } from "./event-covers.js";
 
 const app = express();
+configureProxy(app);
 const port = Number(process.env.PORT ?? 4000);
 const awsRegion = process.env.AWS_REGION;
 const s3Bucket = process.env.AWS_S3_BUCKET;
@@ -135,7 +137,7 @@ const coverUploadLimiter = rateLimit({
 
 function coverImageUrl(request: Request, key: string | null): string | null {
   if (!key || !s3Bucket) return null;
-  const origin = process.env.PUBLIC_API_URL || `${request.protocol}://${request.get("host")}`;
+  const origin = process.env.PUBLIC_API_URL || process.env.RENDER_EXTERNAL_URL || `${request.protocol}://${request.get("host")}`;
   return publicCoverImageUrl(origin, key);
 }
 

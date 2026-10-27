@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "test": "tsx --test src/refund-status.test.ts src/check-in-status.test.ts src/event-covers.test.ts src/event-cover-upload.test.ts src/event-cover-read.test.ts",
+    "test": "tsx --test src/refund-status.test.ts src/check-in-status.test.ts src/event-covers.test.ts src/event-cover-upload.test.ts src/event-cover-read.test.ts src/proxy-config.test.ts",
     "start": "node dist/server.js",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",

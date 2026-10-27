@@ -65,6 +65,7 @@ import { canReviewRefundStatus } from "./refund-status.js";
 import { canTransitionCheckIn } from "./check-in-status.js";
 import { createCoverUploadRouter } from "./event-cover-upload.js";
 import { configureProxy } from "./proxy-config.js";
+import { CoverStorageError, coverVerificationFailure } from "./cover-storage-error.js";
 import {
   coverImageTypes,
   isAllowedCoverImageType,
@@ -173,8 +174,8 @@ async function verifyCoverImageKey(
       return false;
     }
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return coverVerificationFailure(error);
   }
 }
 
@@ -2848,6 +2849,10 @@ app.use(
     response: Response,
     _next: NextFunction,
   ) => {
+    if (error instanceof CoverStorageError) {
+      response.status(error.status).json({ error: error.message });
+      return;
+    }
     console.error(error);
     const code =
       typeof error === "object" && error !== null && "code" in error

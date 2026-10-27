@@ -2,6 +2,7 @@ import express from "express";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { isAllowedCoverImageType, isOwnedCoverImageKey } from "./event-covers.js";
+import { storageErrorDetails } from "./cover-storage-error.js";
 
 export function publicCoverImageUrl(origin: string, key: string): string {
   return `${origin.replace(/\/$/, "")}/api/event-covers/${key.split("/").map(encodeURIComponent).join("/")}`;
@@ -49,6 +50,7 @@ export function createCoverReadRouter(options: {
         response.sendStatus(404);
         return;
       }
+      console.error("Event cover storage read failed", storageErrorDetails(error));
       response.status(502).json({ error: "Could not load the cover image. Try again." });
     }
   });

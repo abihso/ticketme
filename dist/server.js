@@ -21,6 +21,7 @@ const refund_status_js_1 = require("./refund-status.js");
 const check_in_status_js_1 = require("./check-in-status.js");
 const event_cover_upload_js_1 = require("./event-cover-upload.js");
 const proxy_config_js_1 = require("./proxy-config.js");
+const cover_storage_error_js_1 = require("./cover-storage-error.js");
 const event_covers_js_1 = require("./event-covers.js");
 const app = (0, express_1.default)();
 (0, proxy_config_js_1.configureProxy)(app);
@@ -92,8 +93,8 @@ async function verifyCoverImageKey(key, userId) {
         }
         return true;
     }
-    catch {
-        return false;
+    catch (error) {
+        return (0, cover_storage_error_js_1.coverVerificationFailure)(error);
     }
 }
 function signToken(userId) {
@@ -2252,6 +2253,10 @@ app.post("/api/admin/check-in", ...organizerOnly, asyncRoute(async (request, res
     });
 }));
 app.use((error, _request, response, _next) => {
+    if (error instanceof cover_storage_error_js_1.CoverStorageError) {
+        response.status(error.status).json({ error: error.message });
+        return;
+    }
     console.error(error);
     const code = typeof error === "object" && error !== null && "code" in error
         ? String(error.code)

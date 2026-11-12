@@ -1,0 +1,1 @@
+ALTER TABLE "TicketType" ALTER COLUMN "currency" SET DEFAULT 'GHS';

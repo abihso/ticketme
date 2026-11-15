@@ -64,3 +64,18 @@ website's LAN origin in backend `CORS_ORIGINS`. Recipients must use the same
 network while the development servers are running. Local HTTP links are allowed
 only outside production/Render; production email links still require public HTTPS.
 Restart the backend after rebuilding or changing its `.env` configuration.
+
+### Current production website
+
+Set `WEB_APP_URL=https://ticketme-web.vercel.app` in the backend hosting
+environment. Guest-ticket emails will link to
+`https://ticketme-web.vercel.app/guest-ticket#token=...`.
+Include `https://ticketme-web.vercel.app` in `CORS_ORIGINS`, preserving other
+allowed origins. `BREVO_API_KEY` and `BREVO_FROM_EMAIL` must also be configured
+for email delivery.
+
+The web repository includes `vercel.json` with the public ticket route rewrite.
+Deploy it along with the web app. Pushing to GitHub does not copy the ignored
+local `.env` to Render; update Render's environment settings separately and
+restart/redeploy the backend. Resend tickets after updating the website URL so
+recipients receive the new link. No database migration is needed.

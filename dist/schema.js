@@ -97,6 +97,7 @@ exports.tickets = (0, pg_core_1.pgTable)("Ticket", {
         onDelete: "set null",
     }),
     guestName: (0, pg_core_1.text)("guestName"),
+    attendeeName: (0, pg_core_1.text)("attendeeName"),
     seatNumber: (0, pg_core_1.integer)("seatNumber"),
     tokenHash: (0, pg_core_1.text)("tokenHash").notNull(),
     encryptedToken: (0, pg_core_1.text)("encryptedToken").notNull().default(""),
@@ -120,6 +121,10 @@ exports.checkInLogs = (0, pg_core_1.pgTable)("TicketCheckIn", {
         onDelete: "set null",
     }),
     checkedAt: (0, pg_core_1.timestamp)("checkedAt", { precision: 3 }).notNull().defaultNow(),
+    checkedOutAt: (0, pg_core_1.timestamp)("checkedOutAt", { precision: 3 }),
+    checkedOutById: (0, pg_core_1.text)("checkedOutById").references(() => exports.users.id, {
+        onDelete: "set null",
+    }),
 }, (table) => [
     (0, pg_core_1.index)("TicketCheckIn_event_checkedAt_idx").on(table.eventId, table.checkedAt),
     (0, pg_core_1.index)("TicketCheckIn_ticketId_idx").on(table.ticketId),

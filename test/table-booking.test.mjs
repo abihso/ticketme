@@ -59,7 +59,14 @@ async function booking(reference) {
   return result.body.find(item => item.reference === reference);
 }
 const assign = (ticket, guestName, user = customer) => api(`/api/me/tickets/${ticket.id}/guest`, user, 'PATCH', { guestName });
-const scan = (token, action = 'CHECK_IN', user = owner) => api('/api/admin/check-in', user, 'POST', { token, action });
+const previewScan = (token, user = owner) => api('/api/admin/check-in/preview', user, 'POST', { token });
+const confirmScan = (token, attendeeName, action = 'CHECK_IN', user = owner, nameVerified = true) =>
+  api('/api/admin/check-in', user, 'POST', { token, action, attendeeName, nameVerified });
+async function scan(token, action = 'CHECK_IN', user = owner) {
+  const preview = await previewScan(token, user);
+  if (preview.status !== 200) return preview;
+  return confirmScan(token, preview.body.attendeeName ?? 'Original attendee', action, user);
+}
 const lookup = token => api('/api/guest-tickets/lookup', null, 'POST', { token });
 
 before(async () => {
@@ -99,7 +106,7 @@ after(async () => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-test('whole table: four guests, six reserved seats, private assignment and independent single-use entry', async () => {
+test('whole table: four guests, six reserved seats, private assignment and independent entry', async () => {
   const type = await eventType();
   const checkout = await reserve(type);
   assert.equal(checkout.status, 201);
@@ -140,7 +147,7 @@ test('whole table: four guests, six reserved seats, private assignment and indep
   assert.equal((await reserve(type, stranger)).status, 409, 'unused seats are not available to another group');
   assert.equal((await assign(purchase.tickets[0], 'Replacement')).status, 409);
   assert.equal((await scan(issued[0], 'CHECK_OUT')).status, 200);
-  assert.equal((await scan(issued[0])).status, 409, 'guest ticket cannot be reused after checkout');
+  assert.equal((await scan(issued[0])).status, 200, 'guest ticket can be reused after checkout');
   const changed = await assign(purchase.tickets[1], 'Jane');
   assert.equal(changed.status, 200);
   assert.notEqual(changed.body.token, issued[1]);
@@ -226,7 +233,7 @@ test('startup fails clearly when another server already owns the port', async ()
 });
 
 
-test('owners email browser QR links to guests without accounts, with retries and revoked-link protection', async () => {
+test('owners email QR attachments and browser links, with retries and revoked-ticket protection', async () => {
   const type = await eventType();
   const checkout = await reserve(type);
   await pay(checkout.body.reference);
@@ -238,12 +245,24 @@ test('owners email browser QR links to guests without accounts, with retries and
   assert.equal((await email(purchase.tickets[0], 'bad-address')).status, 400);
   assert.equal((await email(purchase.tickets[1], 'guest@example.test')).status, 409);
   assert.equal((await email(purchase.tickets[0], 'fail@example.test')).status, 502);
+  const authFailure = await email(purchase.tickets[0], 'disabled-key@example.test');
+  assert.equal(authFailure.status, 502, 'provider authentication failure must not sign the customer out');
+  assert.equal(authFailure.body.code, 'EMAIL_AUTH_FAILED');
+  assert.match(authFailure.body.error, /email service could not authenticate/i);
+  assert.match(authFailure.body.error, /guest ticket is still valid/i);
+  assert.ok(!JSON.stringify(authFailure.body).includes('test-email-key'));
+  assert.equal((await lookup(token)).status, 200, 'email authentication failure leaves the public guest pass valid');
   assert.equal((await booking(checkout.body.reference)).tickets[0].token, token, 'provider failure does not rotate or consume a ticket');
   const sent = await email(purchase.tickets[0], 'Guest@Example.test');
   assert.equal(sent.status, 200);
   const messages = readFileSync(join(directory, 'emails.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
   const message = messages.at(-1);
   assert.equal(message.to[0].email, 'guest@example.test');
+  assert.equal(message.attachment.length, 1);
+  assert.equal(message.attachment[0].name, `guest-ticket-table-${purchase.tableNumber}-seat-${purchase.tickets[0].seatNumber}.png`);
+  const attachmentImage = Buffer.from(message.attachment[0].content, 'base64');
+  assert.equal(attachmentImage.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  assert.match(message.htmlContent, /QR ticket is attached/);
   assert.match(message.htmlContent, /Guest &lt;script&gt;/);
   assert.ok(!message.htmlContent.includes('<script>alert'));
   const link = new URL(message.htmlContent.match(/href="([^"]+)"/)[1].replaceAll('&amp;', '&'));
@@ -261,11 +280,284 @@ test('owners email browser QR links to guests without accounts, with retries and
   assert.match(opened.body.qrSvg, /^<svg/);
   assert.equal(opened.body.checkedInAt, null, 'opening email link must not check in the guest');
   assert.equal((await email(purchase.tickets[0], 'guest@example.test')).status, 200, 'resending keeps the same ticket valid');
+  const resent = JSON.parse(readFileSync(join(directory, 'emails.jsonl'), 'utf8').trim().split('\n').at(-1));
+  assert.equal(resent.attachment[0].content, message.attachment[0].content, 'resending attaches the same valid QR code');
   await assign(purchase.tickets[0], 'New guest');
   assert.equal((await lookup(token)).status, 404);
   assert.equal((await email(purchase.tickets[0], 'guest@example.test')).status, 409, 'stale wallet cannot email a new guest token');
   const latest = (await booking(checkout.body.reference)).tickets[0].token;
+  assert.equal((await email(purchase.tickets[0], 'guest@example.test', latest)).status, 200);
+  const reassignedMessage = JSON.parse(readFileSync(join(directory, 'emails.jsonl'), 'utf8').trim().split('\n').at(-1));
+  assert.notEqual(reassignedMessage.attachment[0].content, message.attachment[0].content, 'reassigned guest receives a new QR image');
+  assert.equal((await scan(token)).status, 404, 'the previously emailed QR is revoked after reassignment');
   assert.equal((await scan(latest)).status, 200);
-  assert.equal((await lookup(latest)).body.qrSvg, null);
+  assert.match((await lookup(latest)).body.qrSvg, /^<svg/, 'QR stays visible for checkout');
   assert.equal((await email(purchase.tickets[0], 'guest@example.test', latest)).status, 409);
+  assert.equal((await scan(latest, 'CHECK_OUT')).status, 200);
+  assert.equal((await email(purchase.tickets[0], 'next-guest@example.test', latest)).status, 409, 'checkout does not allow sending the ticket to another attendee');
+  assert.equal((await assign(purchase.tickets[0], 'Another attendee')).status, 409, 'checkout does not allow guest reassignment');
+  assert.equal((await scan(latest)).status, 200, 'the original attendee can re-enter after checkout');
+  assert.equal((await scan(latest)).status, 409, 'duplicate entry is blocked while inside');
+});
+
+
+const requestRefund = (purchase, user = customer) => api('/api/me/refund-requests', user, 'POST', {
+  purchaseId: purchase.id, reason: 'I did not attend this event.',
+});
+async function endEvent(purchase, withEnd = true) {
+  await sql`update "Event" set "startsAt" = ${new Date(Date.now() - 7200000).toISOString()},
+    "endsAt" = ${withEnd ? new Date(Date.now() - 3600000).toISOString() : null} where id = ${purchase.event.id}`;
+}
+
+test('past table tickets remain readable but assignment, clearing and email are blocked; unused refunds work', async () => {
+  const type = await eventType();
+  const checkout = await reserve(type);
+  await pay(checkout.body.reference);
+  const purchase = await booking(checkout.body.reference);
+  const guest = await assign(purchase.tickets[0], 'Guest');
+  await endEvent(purchase);
+  assert.equal((await booking(checkout.body.reference)).tickets.length, 6);
+  assert.equal((await booking(checkout.body.reference)).canRequestRefund, true);
+  for (const [ticket, name] of [[purchase.tickets[0], 'Replacement'], [purchase.tickets[0], null], [purchase.tickets[1], 'Late guest']]) {
+    const result = await assign(ticket, name);
+    assert.equal(result.status, 409);
+    assert.match(result.body.error, /event has ended/i);
+  }
+  const email = await api(`/api/me/tickets/${purchase.tickets[0].id}/email`, customer, 'POST', {
+    email: 'guest@example.test', token: guest.body.token,
+  });
+  assert.equal(email.status, 409);
+  assert.match(email.body.error, /event has ended/i);
+  assert.equal((await booking(checkout.body.reference)).tickets[0].token, guest.body.token);
+  assert.equal((await requestRefund(purchase, stranger)).status, 404);
+  assert.equal((await requestRefund(purchase)).status, 201);
+  assert.equal((await requestRefund(purchase)).status, 409, 'duplicate requests stay blocked');
+});
+
+test('an ongoing event with a future end still allows table guest management', async () => {
+  const checkout = await reserve(await eventType());
+  await pay(checkout.body.reference);
+  const purchase = await booking(checkout.body.reference);
+  await sql`update "Event" set "startsAt" = ${new Date(Date.now() - 3600000).toISOString()},
+    "endsAt" = ${new Date(Date.now() + 3600000).toISOString()} where id = ${purchase.event.id}`;
+  const guest = await assign(purchase.tickets[0], 'During event');
+  assert.equal(guest.status, 200);
+  assert.equal((await api(`/api/me/tickets/${purchase.tickets[0].id}/email`, customer, 'POST', {
+    email: 'guest@example.test', token: guest.body.token,
+  })).status, 200);
+  await endEvent(purchase, false);
+  assert.equal((await assign(purchase.tickets[1], 'Late guest')).status, 409, 'no end time uses start time');
+});
+
+test('attendance on any table seat prevents whole-booking refunds, including after checkout', async () => {
+  const checkout = await reserve(await eventType());
+  await pay(checkout.body.reference);
+  const purchase = await booking(checkout.body.reference);
+  const guest = await assign(purchase.tickets[1], 'Attendee');
+  assert.equal((await scan(guest.body.token)).status, 200);
+  assert.equal((await requestRefund(purchase)).status, 409);
+  assert.equal((await scan(guest.body.token, 'CHECK_OUT')).status, 200);
+  await endEvent(purchase);
+  assert.equal((await booking(checkout.body.reference)).canRequestRefund, false);
+  assert.equal((await requestRefund(purchase)).status, 409);
+});
+
+test('past individual tickets cannot transfer but unused bookings can request refunds', async () => {
+  const checkout = await reserve(await eventType({ capacity: null }));
+  await pay(checkout.body.reference);
+  const purchase = await booking(checkout.body.reference);
+  await endEvent(purchase);
+  assert.equal((await api(`/api/me/tickets/${purchase.tickets[0].id}/transfer`, customer, 'POST', {
+    email: stranger + '@example.test',
+  })).status, 404);
+  assert.equal((await requestRefund(purchase)).status, 201);
+});
+
+test('refund eligibility includes attendance on tickets transferred away from the purchaser', async () => {
+  const checkout = await reserve(await eventType({ capacity: null }));
+  await pay(checkout.body.reference);
+  const purchase = await booking(checkout.body.reference);
+  await sql`update "User" set "emailVerified" = true where id = ${stranger}`;
+  assert.equal((await api(`/api/me/tickets/${purchase.tickets[0].id}/transfer`, customer, 'POST', {
+    email: stranger + '@example.test',
+  })).status, 200);
+  const recipientWallet = await api('/api/purchases', stranger);
+  const received = recipientWallet.body.find(item => item.id === purchase.id);
+  assert.equal(received.canRequestRefund, false, 'only the purchaser can request a refund');
+  assert.equal((await scan(received.tickets[0].token)).status, 200);
+  await endEvent(purchase);
+  const purchaserWallet = await booking(checkout.body.reference);
+  assert.equal(purchaserWallet.tickets.length, 0);
+  assert.equal(purchaserWallet.canRequestRefund, false);
+  assert.equal((await requestRefund(purchase)).status, 409);
+});
+
+test('unpaid bookings cannot request refunds', async () => {
+  const checkout = await reserve(await eventType());
+  const purchase = await booking(checkout.body.reference);
+  assert.equal(purchase.canRequestRefund, false);
+  assert.equal((await requestRefund(purchase)).status, 404);
+});
+
+for (const capacity of [null, 6]) {
+  test(`${capacity ? 'table guest' : 'individual'} ticket: repeated visits keep status, history and counts; duplicate scans are atomic`, async () => {
+    const checkout = await reserve(await eventType({ capacity }));
+    await pay(checkout.body.reference);
+    const purchase = await booking(checkout.body.reference);
+    const ticket = purchase.tickets[0];
+    const entryToken = capacity ? (await assign(ticket, 'First attendee')).body.token : ticket.token;
+    const baseline = (await api('/api/admin/summary', owner)).body;
+    assert.equal((await scan(entryToken, 'CHECK_OUT')).status, 409, 'unused tickets cannot check out');
+    for (let visit = 1; visit <= 3; visit++) {
+      const entering = await Promise.all([scan(entryToken), scan(entryToken)]);
+      assert.deepEqual(entering.map(result => result.status).sort(), [200, 409]);
+      assert.equal(entering.find(result => result.status === 200).body.status, 'CHECKED_IN');
+      const inside = (await booking(checkout.body.reference)).tickets[0];
+      assert.ok(inside.checkedInAt);
+      assert.equal(inside.checkedOutAt, null);
+      assert.equal((await scan(entryToken)).status, 409, 'duplicate entry is blocked until checkout');
+      if (capacity) {
+        const pass = (await lookup(entryToken)).body;
+        assert.equal(pass.checkedOutAt, null);
+        assert.match(pass.qrSvg, /^<svg/, 'the pass must remain scannable for checkout');
+      }
+      const insideSummary = (await api('/api/admin/summary', owner)).body;
+      assert.equal(insideSummary.checkedInCount, baseline.checkedInCount + 1);
+      assert.equal(insideSummary.totalCheckIns, baseline.totalCheckIns + visit);
+      assert.equal(insideSummary.ticketsEverCheckedIn, baseline.ticketsEverCheckedIn + 1);
+      const exiting = await Promise.all([scan(entryToken, 'CHECK_OUT'), scan(entryToken, 'CHECK_OUT')]);
+      assert.deepEqual(exiting.map(result => result.status).sort(), [200, 409]);
+      assert.equal(exiting.find(result => result.status === 200).body.status, 'CHECKED_OUT');
+      const outside = await booking(checkout.body.reference);
+      assert.ok(outside.tickets[0].checkedOutAt);
+      assert.equal(outside.canRequestRefund, false, 'checkout never erases attendance');
+      assert.equal((await scan(entryToken, 'CHECK_OUT')).status, 409);
+      if (capacity) {
+        const pass = (await lookup(entryToken)).body;
+        assert.ok(pass.checkedOutAt);
+        assert.match(pass.qrSvg, /^<svg/, 'the same pass is ready for the original attendee to re-enter');
+      }
+      const outsideSummary = (await api('/api/admin/summary', owner)).body;
+      assert.equal(outsideSummary.checkedInCount, baseline.checkedInCount);
+      assert.equal(outsideSummary.totalCheckIns, baseline.totalCheckIns + visit);
+    }
+    const history = await sql`select * from "TicketCheckIn" where "ticketId" = ${ticket.id} order by "checkedAt"`;
+    assert.equal(history.length, 3, 'only successful check-ins create visits');
+    for (const [index, visit] of history.entries()) {
+      assert.equal(visit.actorId, owner);
+      assert.equal(visit.checkedOutById, owner);
+      assert.ok(visit.checkedOutAt);
+      assert.ok(new Date(visit.checkedOutAt) >= new Date(visit.checkedAt));
+      if (index) assert.ok(new Date(visit.checkedAt) >= new Date(history[index - 1].checkedOutAt));
+    }
+    assert.equal((await requestRefund(purchase)).status, 409);
+  });
+}
+
+test('legacy active tickets without a visit log retain their original entry when checked out', async () => {
+  const checkout = await reserve(await eventType({ capacity: null }));
+  await pay(checkout.body.reference);
+  const purchase = await booking(checkout.body.reference);
+  const ticket = purchase.tickets[0];
+  const enteredAt = new Date(Date.now() - 60000).toISOString();
+  await sql`update "Ticket" set "checkedInAt" = ${enteredAt} where id = ${ticket.id}`;
+  assert.equal((await scan(ticket.token, 'CHECK_OUT')).status, 200);
+  const [visit] = await sql`select * from "TicketCheckIn" where "ticketId" = ${ticket.id}`;
+  assert.equal(new Date(visit.checkedAt).toISOString(), enteredAt);
+  assert.equal(visit.actorId, null, 'unknown legacy entry operator must not be invented');
+  assert.equal(visit.checkedOutById, owner);
+  assert.ok(visit.checkedOutAt);
+  assert.equal((await scan(ticket.token)).status, 200);
+});
+
+test('visit migration backfills known legacy exits without inventing earlier checkout history', async () => {
+  const checkout = await reserve(await eventType({ capacity: null, quantity: 2 }), customer, 2);
+  await pay(checkout.body.reference);
+  const purchase = await booking(checkout.body.reference);
+  const [logged, legacy] = purchase.tickets;
+  for (let visit = 0; visit < 2; visit++) {
+    assert.equal((await scan(logged.token)).status, 200);
+    assert.equal((await scan(logged.token, 'CHECK_OUT')).status, 200);
+  }
+  await sql`update "TicketCheckIn" set "checkedOutAt" = null, "checkedOutById" = null where "ticketId" = ${logged.id}`;
+  const enteredAt = new Date(Date.now() - 60000).toISOString();
+  const exitedAt = new Date(Date.now() - 30000).toISOString();
+  await sql`update "Ticket" set "checkedInAt" = ${enteredAt}, "checkedOutAt" = ${exitedAt} where id = ${legacy.id}`;
+  const backfill = readFileSync(resolve('drizzle/0011_ticket_visit_checkouts.sql'), 'utf8')
+    .split('--> statement-breakpoint').slice(3);
+  for (let run = 0; run < 2; run++) {
+    for (const statement of backfill) await sql.unsafe(statement);
+  }
+  const loggedHistory = await sql`select * from "TicketCheckIn" where "ticketId" = ${logged.id} order by "checkedAt"`;
+  assert.equal(loggedHistory.length, 2);
+  assert.equal(loggedHistory[0].checkedOutAt, null, 'older unrecorded exit stays unknown');
+  assert.ok(loggedHistory[1].checkedOutAt, 'latest known exit is preserved');
+  const legacyHistory = await sql`select * from "TicketCheckIn" where "ticketId" = ${legacy.id}`;
+  assert.equal(legacyHistory.length, 1, 'backfill is idempotent');
+  assert.equal(new Date(legacyHistory[0].checkedAt).toISOString(), enteredAt);
+  assert.equal(new Date(legacyHistory[0].checkedOutAt).toISOString(), exitedAt);
+  assert.equal(legacyHistory[0].actorId, null);
+  assert.equal(legacyHistory[0].checkedOutById, null);
+});
+
+test('staff must verify the assigned name before table entry or exit; preview never consumes the ticket', async () => {
+  const checkout = await reserve(await eventType());
+  await pay(checkout.body.reference);
+  const purchase = await booking(checkout.body.reference);
+  const issued = await assign(purchase.tickets[0], 'Sarah Mensah');
+  const qr = issued.body.token;
+  assert.equal((await previewScan(qr, stranger)).status, 403);
+  assert.equal((await previewScan(qr, otherOrganizer)).status, 404);
+  const preview = await previewScan(qr);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.body.attendeeName, 'Sarah Mensah');
+  assert.equal(preview.body.status, 'NOT_CHECKED_IN');
+  assert.equal((await booking(checkout.body.reference)).tickets[0].checkedInAt, null);
+  assert.equal((await api('/api/admin/check-in', owner, 'POST', { token: qr })).status, 400, 'old clients cannot bypass name verification');
+  assert.equal((await confirmScan(qr, 'Sarah Mensah', 'CHECK_IN', owner, false)).status, 400);
+  assert.equal((await confirmScan(qr, 'Other Person')).status, 409);
+  const entered = await confirmScan(qr, '  sarah   mensah  ');
+  assert.equal(entered.status, 200);
+  assert.equal(entered.body.attendeeName, 'Sarah Mensah', 'the original spelling is retained');
+  assert.equal((await confirmScan(qr, 'Other Person', 'CHECK_OUT')).status, 409);
+  assert.equal((await previewScan(qr)).body.status, 'CHECKED_IN');
+  assert.equal((await confirmScan(qr, 'Sarah Mensah', 'CHECK_OUT')).status, 200);
+  const afterExit = await previewScan(qr);
+  assert.equal(afterExit.body.attendeeName, 'Sarah Mensah');
+  assert.equal(afterExit.body.status, 'CHECKED_OUT');
+  assert.equal(afterExit.body.hasAttended, true);
+  assert.equal((await confirmScan(qr, 'Other Person')).status, 409, 'checkout never unlocks the attendee name');
+  assert.equal((await confirmScan(qr, 'Sarah Mensah')).status, 200);
+  const logs = await sql`select * from "TicketCheckIn" where "ticketId" = ${purchase.tickets[0].id}`;
+  assert.equal(logs.length, 2, 'rejected or previewed scans do not create history');
+});
+
+test('individual tickets record a separate name per attendee and keep it across visits', async () => {
+  const checkout = await reserve(await eventType({ capacity: null, quantity: 2 }), customer, 2);
+  await pay(checkout.body.reference);
+  const purchase = await booking(checkout.body.reference);
+  const [first, second] = purchase.tickets;
+  assert.equal((await previewScan(first.token)).body.attendeeName, null, 'purchaser name is not assumed for a group');
+  assert.equal((await confirmScan(first.token, '   ')).status, 400);
+  assert.equal((await confirmScan(first.token, 'Ama Mensah')).status, 200);
+  assert.equal((await confirmScan(second.token, 'Kojo Mensah')).status, 200);
+  assert.equal((await confirmScan(first.token, 'Ama Mensah', 'CHECK_OUT')).status, 200);
+  assert.equal((await confirmScan(first.token, 'Kojo Mensah')).status, 409);
+  assert.equal((await confirmScan(first.token, 'Ama Mensah')).status, 200);
+  const wallet = await booking(checkout.body.reference);
+  assert.equal(wallet.tickets.find(ticket => ticket.id === first.id).attendeeName, 'Ama Mensah');
+  assert.equal(wallet.tickets.find(ticket => ticket.id === second.id).attendeeName, 'Kojo Mensah');
+});
+
+test('concurrent first scans cannot bind an individual ticket to two names', async () => {
+  const checkout = await reserve(await eventType({ capacity: null }));
+  await pay(checkout.body.reference);
+  const purchase = await booking(checkout.body.reference);
+  const qr = purchase.tickets[0].token;
+  const results = await Promise.all([confirmScan(qr, 'Ama'), confirmScan(qr, 'Kojo')]);
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 409]);
+  const name = results.find(result => result.status === 200).body.attendeeName;
+  assert.equal((await previewScan(qr)).body.attendeeName, name);
+  assert.equal((await confirmScan(qr, name, 'CHECK_OUT')).status, 200);
+  assert.equal((await confirmScan(qr, name === 'Ama' ? 'Kojo' : 'Ama')).status, 409);
 });

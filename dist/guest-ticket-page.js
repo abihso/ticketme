@@ -9,7 +9,7 @@ exports.guestTicketPage = `<!doctype html>
 </style></head><body><main><p class="brand">ALTBIT · GUEST PASS</p><h1>Your guest ticket</h1>
 <p id="status" role="status">Loading your ticket…</p><p id="error" role="alert" hidden></p>
 <section id="ticket" hidden><h2 id="event"></h2><p id="details" class="muted"></p><h2 id="guest"></h2><p id="seat"></p>
-<div id="entry" hidden><img id="qr" alt="Your individual entry QR code"><p>Show this QR code to staff at entry. You can arrive separately from your group.</p><p class="muted">This ticket admits one guest once. Keep it private.</p><details><summary>Show entry code</summary><p id="code"></p></details></div></section>
+<div id="entry" hidden><img id="qr" alt="Your individual entry QR code"><p>Show this QR code to staff at entry and exit. You can arrive separately from your group.</p><p class="muted">This ticket is for the original attendee only. Check out before re-entering. Do not share it after use. Keep it private.</p><details><summary>Show entry code</summary><p id="code"></p></details></div></section>
 <button id="refresh" type="button">Refresh ticket status</button><p class="muted">No account or app required.</p></main><script src="/guest-ticket.js" defer></script></body></html>`;
 exports.guestTicketScript = `(() => {
   const element = id => document.getElementById(id);
@@ -39,10 +39,9 @@ exports.guestTicketScript = `(() => {
       element('guest').textContent = ticket.guestName;
       element('seat').textContent = ticket.ticketType + ' · Table ' + ticket.tableNumber + ' · Seat ' + ticket.seatNumber;
       element('ticket').hidden = false;
-      if (ticket.checkedInAt) {
-        element('status').textContent = ticket.checkedOutAt ? 'Ticket used · checked out' : 'Ticket used · checked in';
-      } else if (ticket.qrSvg) {
-        element('status').textContent = 'Ready for entry';
+      element('status').textContent = ticket.checkedOutAt ? 'Checked out · Ready for entry'
+        : ticket.checkedInAt ? 'Checked in · Check out before another entry' : 'Ready for entry';
+      if (ticket.qrSvg) {
         element('qr').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(ticket.qrSvg);
         element('code').textContent = token;
         element('entry').hidden = false;

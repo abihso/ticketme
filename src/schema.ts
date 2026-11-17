@@ -128,6 +128,7 @@ export const tickets = pgTable(
       onDelete: "set null",
     }),
     guestName: text("guestName"),
+    attendeeName: text("attendeeName"),
     seatNumber: integer("seatNumber"),
     tokenHash: text("tokenHash").notNull(),
     encryptedToken: text("encryptedToken").notNull().default(""),
@@ -156,6 +157,10 @@ export const checkInLogs = pgTable(
       onDelete: "set null",
     }),
     checkedAt: timestamp("checkedAt", { precision: 3 }).notNull().defaultNow(),
+    checkedOutAt: timestamp("checkedOutAt", { precision: 3 }),
+    checkedOutById: text("checkedOutById").references(() => users.id, {
+      onDelete: "set null",
+    }),
   },
   (table) => [
     index("TicketCheckIn_event_checkedAt_idx").on(

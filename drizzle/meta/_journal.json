@@ -78,6 +78,20 @@
       "when": 1794421191470,
       "tag": "0010_whole_table_bookings",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1794926049505,
+      "tag": "0011_ticket_visit_checkouts",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1794926598719,
+      "tag": "0012_verified_attendee_names",
+      "breakpoints": true
     }
   ]
 }

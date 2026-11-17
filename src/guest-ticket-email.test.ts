@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { guestTicketEmail, guestTicketLink } from "./guest-ticket-email.js";
+import { guestTicketEmail, guestTicketLink, guestTicketAttachment } from "./guest-ticket-email.js";
 
 test("guest email links use public HTTPS and keep the ticket token out of request URLs", () => {
   for (const origin of [undefined, "http://example.test", "https://localhost", "https://user:password@example.test", "https://example.test/?token=x"]) {
@@ -21,6 +21,22 @@ test("guest emails escape names and event details without making the email an en
   assert.match(html, /A &amp; B/);
   assert.match(html, /No account or app is needed/);
   assert.match(html, /Table 1 · Seat 2/);
+  assert.match(html, /attached to this email as a PNG image/);
+  assert.match(html, /previous QR code stops working, including any downloaded copy/);
+});
+
+test("guest QR attachments are portable PNGs with seat-specific names and a white quiet zone", async () => {
+  const attachment = await guestTicketAttachment("current-private-guest-token", { tableNumber: 3, seatNumber: 2 });
+  assert.equal(attachment.name, "guest-ticket-table-3-seat-2.png");
+  assert.ok(!attachment.name.includes("current-private-guest-token"));
+  assert.ok(!attachment.content.startsWith("data:"), "Brevo expects raw base64 content");
+  const png = Buffer.from(attachment.content, "base64");
+  assert.equal(png.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+  assert.equal(png.toString("ascii", 12, 16), "IHDR");
+  const width = png.readUInt32BE(16), height = png.readUInt32BE(20);
+  assert.equal(width, height);
+  assert.ok(width >= 290, "attachment must be large enough to scan without enlarging");
+  assert.ok(png.length < 100_000, "individual QR attachment stays small for email clients");
 });
 
 

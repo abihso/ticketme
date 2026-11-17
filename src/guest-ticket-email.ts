@@ -33,7 +33,27 @@ export function guestTicketEmail(ticket: {
 <p>You have a ticket for <strong>${escapeHtml(ticket.event)}</strong>.</p>
 <p>${escapeHtml(ticket.venue)}<br>${escapeHtml(ticket.startsAt.toUTCString())}</p>
 <p>${escapeHtml(ticket.ticketType)} · Table ${ticket.tableNumber} · Seat ${ticket.seatNumber}</p>
+<p>Your QR ticket is attached to this email as a PNG image. Download or open the attachment and show its QR code to staff at entry.</p>
 <p><a href="${escapeHtml(link)}">Open your QR ticket</a></p>
-<p>No account or app is needed. Open the link in your browser and show the QR code to staff at entry. You can arrive separately from your group.</p>
-<p>This ticket admits one guest once. Keep this email private. If your seat is reassigned, ask the booking owner for a new ticket.</p>`;
+<p>No account or app is needed. You can also open the link in your browser to view your ticket and its current status. You can arrive separately from your group.</p>
+<p>This ticket is for the original attendee only. Show the QR code at entry and exit. Check out before re-entering. Do not share it after use. Keep this email and its attachment private. If your seat is reassigned, the previous QR code stops working, including any downloaded copy. Ask the booking owner for a new ticket.</p>`;
+}
+import QRCode from "qrcode";
+
+
+export async function guestTicketAttachment(
+  token: string,
+  seat: { tableNumber: number; seatNumber: number },
+): Promise<{ name: string; content: string }> {
+  const image = await QRCode.toBuffer(token, {
+    type: "png",
+    scale: 10,
+    margin: 4,
+    errorCorrectionLevel: "M",
+    color: { dark: "#000000ff", light: "#ffffffff" },
+  });
+  return {
+    name: `guest-ticket-table-${seat.tableNumber}-seat-${seat.seatNumber}.png`,
+    content: image.toString("base64"),
+  };
 }

@@ -21,6 +21,7 @@ const db_js_1 = require("./db.js");
 const schema_js_1 = require("./schema.js");
 const zod_1 = require("zod");
 const refund_status_js_1 = require("./refund-status.js");
+const event_time_js_1 = require("./event-time.js");
 const check_in_status_js_1 = require("./check-in-status.js");
 const event_cover_upload_js_1 = require("./event-cover-upload.js");
 const proxy_config_js_1 = require("./proxy-config.js");
@@ -162,13 +163,22 @@ async function verifyPassword(password, stored) {
     const actual = (await scrypt(password, salt, expected.length));
     return expected.length === actual.length && (0, node_crypto_1.timingSafeEqual)(expected, actual);
 }
-async function sendEmail(to, subject, htmlContent) {
-    const apiKey = process.env.BREVO_API_KEY;
-    const sender = process.env.BREVO_FROM_EMAIL;
+class EmailDeliveryError extends Error {
+    code;
+    constructor(code, message) {
+        super(message);
+        this.code = code;
+        this.name = "EmailDeliveryError";
+    }
+}
+async function sendEmail(to, subject, htmlContent, attachments = []) {
+    const apiKey = process.env.BREVO_API_KEY?.trim();
+    const sender = process.env.BREVO_FROM_EMAIL?.trim();
     if (!apiKey || !sender)
-        throw new Error("Email delivery is not configured (BREVO_API_KEY and BREVO_FROM_EMAIL required)");
+        throw new EmailDeliveryError("EMAIL_NOT_CONFIGURED", "Email delivery is not configured. Please contact event support.");
     const response = await fetch("https://api.brevo.com/v3/smtp/email", {
         method: "POST",
+        signal: AbortSignal.timeout(15_000),
         headers: { "api-key": apiKey, "content-type": "application/json" },
         body: JSON.stringify({
             sender: {
@@ -178,11 +188,19 @@ async function sendEmail(to, subject, htmlContent) {
             to: [{ email: to }],
             subject,
             htmlContent,
+            ...(attachments.length ? { attachment: attachments } : {}),
         }),
     });
     if (!response.ok) {
-        const details = await response.text();
-        console.error("Email provider rejected a message:", response.status, details);
+        // Log only a provider code, never an echoed email body, ticket link, or key.
+        const details = await response.json().catch(() => null);
+        const providerCode = typeof details?.code === "string" && /^[a-z_]{1,64}$/.test(details.code)
+            ? details.code : "unknown";
+        console.error("Email provider rejected a message:", response.status, providerCode);
+        if (response.status === 401) {
+            console.error("Brevo authentication failed. Enable or replace BREVO_API_KEY in the backend hosting environment with an active Brevo API key, then restart the service.");
+            throw new EmailDeliveryError("EMAIL_AUTH_FAILED", "The email service could not authenticate. Please contact event support to update the email-service credentials.");
+        }
         throw new Error("Email provider could not send the message");
     }
 }
@@ -1686,6 +1704,15 @@ app.post("/api/me/refund-requests", authenticate, asyncRoute(async (request, res
         response.status(404).json({ error: "Paid purchase not found" });
         return;
     }
+    // Refunds cover the whole purchase, including tickets transferred away.
+    // A checkout does not undo attendance: checkedInAt remains recorded.
+    const [attended] = await db_js_1.db.select({ id: schema_js_1.tickets.id }).from(schema_js_1.tickets)
+        .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(schema_js_1.tickets.purchaseId, purchase.id), (0, drizzle_orm_1.isNotNull)(schema_js_1.tickets.checkedInAt)))
+        .limit(1);
+    if (attended) {
+        response.status(409).json({ error: "Refunds can only be requested for bookings where no tickets have been used." });
+        return;
+    }
     const [refund] = await db_js_1.db
         .insert(schema_js_1.refundRequests)
         .values({
@@ -1811,11 +1838,17 @@ app.patch("/api/me/tickets/:ticketId/guest", authenticate, asyncRoute(async (req
         return;
     }
     const { userId } = request.auth;
-    const [found] = await db_js_1.db.select({ ticket: schema_js_1.tickets }).from(schema_js_1.tickets)
+    const [found] = await db_js_1.db.select({ ticket: schema_js_1.tickets, startsAt: schema_js_1.events.startsAt, endsAt: schema_js_1.events.endsAt }).from(schema_js_1.tickets)
         .innerJoin(schema_js_1.purchases, (0, drizzle_orm_1.eq)(schema_js_1.tickets.purchaseId, schema_js_1.purchases.id))
+        .innerJoin(schema_js_1.ticketTypes, (0, drizzle_orm_1.eq)(schema_js_1.purchases.ticketTypeId, schema_js_1.ticketTypes.id))
+        .innerJoin(schema_js_1.events, (0, drizzle_orm_1.eq)(schema_js_1.ticketTypes.eventId, schema_js_1.events.id))
         .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(schema_js_1.tickets.id, ticketId), (0, drizzle_orm_1.eq)(schema_js_1.purchases.userId, userId), (0, drizzle_orm_1.eq)(schema_js_1.purchases.status, "PAID"), (0, drizzle_orm_1.isNotNull)(schema_js_1.purchases.tableCapacity))).limit(1);
     if (!found) {
         response.status(404).json({ error: "Table guest ticket not found" });
+        return;
+    }
+    if ((0, event_time_js_1.hasEventEnded)(found)) {
+        response.status(409).json({ error: "This event has ended. Past tickets are view-only." });
         return;
     }
     const token = (0, node_crypto_1.randomBytes)(32).toString("base64url");
@@ -1859,14 +1892,18 @@ app.post("/api/me/tickets/:ticketId/email", authenticate, (0, express_rate_limit
     const [ticket] = await db_js_1.db.select({
         guestName: schema_js_1.tickets.guestName, seatNumber: schema_js_1.tickets.seatNumber,
         tableNumber: schema_js_1.purchases.tableNumber, ticketType: schema_js_1.ticketTypes.name,
-        event: schema_js_1.events.title, venue: schema_js_1.events.venue, startsAt: schema_js_1.events.startsAt,
+        event: schema_js_1.events.title, venue: schema_js_1.events.venue, startsAt: schema_js_1.events.startsAt, endsAt: schema_js_1.events.endsAt,
     }).from(schema_js_1.tickets)
         .innerJoin(schema_js_1.purchases, (0, drizzle_orm_1.eq)(schema_js_1.tickets.purchaseId, schema_js_1.purchases.id))
         .innerJoin(schema_js_1.ticketTypes, (0, drizzle_orm_1.eq)(schema_js_1.purchases.ticketTypeId, schema_js_1.ticketTypes.id))
         .innerJoin(schema_js_1.events, (0, drizzle_orm_1.eq)(schema_js_1.ticketTypes.eventId, schema_js_1.events.id))
         .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(schema_js_1.tickets.id, ticketId), (0, drizzle_orm_1.eq)(schema_js_1.purchases.userId, userId), (0, drizzle_orm_1.eq)(schema_js_1.purchases.status, "PAID"), (0, drizzle_orm_1.isNotNull)(schema_js_1.purchases.tableCapacity), (0, drizzle_orm_1.isNotNull)(schema_js_1.tickets.guestName), (0, drizzle_orm_1.isNull)(schema_js_1.tickets.checkedInAt), (0, drizzle_orm_1.eq)(schema_js_1.tickets.tokenHash, (0, node_crypto_1.createHash)("sha256").update(parsed.data.token).digest("hex")))).limit(1);
     if (!ticket || !ticket.guestName || !ticket.tableNumber || !ticket.seatNumber) {
-        response.status(409).json({ error: "This guest ticket is unavailable, already used, or has changed. Refresh your booking before sending." });
+        response.status(409).json({ error: "This guest ticket is unavailable, has already been used, or has changed. Tickets cannot be sent to another attendee after first entry." });
+        return;
+    }
+    if ((0, event_time_js_1.hasEventEnded)(ticket)) {
+        response.status(409).json({ error: "This event has ended. Past tickets are view-only." });
         return;
     }
     let link;
@@ -1880,15 +1917,22 @@ app.post("/api/me/tickets/:ticketId/email", authenticate, (0, express_rate_limit
         return;
     }
     try {
+        const attachment = await (0, guest_ticket_email_js_1.guestTicketAttachment)(parsed.data.token, {
+            tableNumber: ticket.tableNumber, seatNumber: ticket.seatNumber,
+        });
         await sendEmail(parsed.data.email, "Your guest ticket", (0, guest_ticket_email_js_1.guestTicketEmail)({
             ...ticket, guestName: ticket.guestName, tableNumber: ticket.tableNumber, seatNumber: ticket.seatNumber,
-        }, link));
+        }, link), [attachment]);
     }
-    catch {
-        response.status(502).json({ error: "Could not send the ticket email. Please try again. Your guest ticket is still valid." });
+    catch (reason) {
+        const code = reason instanceof EmailDeliveryError ? reason.code : "EMAIL_DELIVERY_FAILED";
+        console.error("Guest ticket email failed:", code);
+        const message = reason instanceof EmailDeliveryError
+            ? reason.message : "Could not send the ticket email. Please try again.";
+        response.status(502).json({ code, error: `${message} Your guest ticket is still valid.` });
         return;
     }
-    response.json({ message: `Ticket email sent to ${parsed.data.email}. Ask your guest to check their inbox and spam folder.` });
+    response.json({ message: `Ticket email sent to ${parsed.data.email} with a QR image attachment and web link. Ask your guest to check their inbox and spam folder.` });
 }));
 app.post("/api/guest-tickets/lookup", (0, express_rate_limit_1.default)({ windowMs: 60_000, limit: 60, standardHeaders: "draft-8", legacyHeaders: false }), asyncRoute(async (request, response) => {
     response.set("Cache-Control", "no-store");
@@ -1913,7 +1957,8 @@ app.post("/api/guest-tickets/lookup", (0, express_rate_limit_1.default)({ window
     }
     response.json({
         ...ticket,
-        qrSvg: ticket.checkedInAt ? null : await qrcode_1.default.toString(parsed.data.token, { type: "svg", margin: 4, width: 260, errorCorrectionLevel: "M" }),
+        // The same code is needed at exit as well as for the next entry.
+        qrSvg: await qrcode_1.default.toString(parsed.data.token, { type: "svg", margin: 4, width: 260, errorCorrectionLevel: "M" }),
     });
 }));
 app.post("/api/me/tickets/:ticketId/transfer", authenticate, asyncRoute(async (request, response) => {
@@ -2303,6 +2348,8 @@ app.get("/api/purchases", authenticate, asyncRoute(async (request, response) => 
         tableNumber: purchase.tableNumber,
         tableCapacity: purchase.tableCapacity,
         isBookingOwner: purchase.ownerUserId === userId,
+        canRequestRefund: purchase.status === "PAID" && purchase.ownerUserId === userId &&
+            !ticketRows.some((ticket) => ticket.purchaseId === purchase.id && ticket.checkedInAt !== null),
         createdAt: purchase.createdAt,
         event: {
             id: purchase.eventId,
@@ -2322,6 +2369,7 @@ app.get("/api/purchases", authenticate, asyncRoute(async (request, response) => 
                 .map((ticket) => ({
                 id: ticket.id,
                 guestName: ticket.guestName,
+                attendeeName: ticket.attendeeName,
                 seatNumber: ticket.seatNumber,
                 checkedInAt: ticket.checkedInAt,
                 checkedOutAt: ticket.checkedOutAt,
@@ -2330,27 +2378,15 @@ app.get("/api/purchases", authenticate, asyncRoute(async (request, response) => 
             : [],
     })));
 }));
-const checkInSchema = zod_1.z.object({
-    token: zod_1.z.string().min(16).max(256),
-    action: zod_1.z.enum(["CHECK_IN", "CHECK_OUT"]).default("CHECK_IN"),
-});
-app.post("/api/admin/check-in", ...organizerOnly, asyncRoute(async (request, response) => {
-    const parsed = checkInSchema.safeParse(request.body);
-    if (!parsed.success) {
-        response.status(400).json({ error: "Invalid ticket token" });
-        return;
-    }
-    const tokenHash = (0, node_crypto_1.createHash)("sha256")
-        .update(parsed.data.token)
-        .digest("hex");
-    const { userId, role } = request.auth;
-    const ticket = await db_js_1.db
+async function findTicketForScan(tokenHash) {
+    const [ticket] = await db_js_1.db
         .select({
         id: schema_js_1.tickets.id,
         eventId: schema_js_1.events.id,
         checkedInAt: schema_js_1.tickets.checkedInAt,
         checkedOutAt: schema_js_1.tickets.checkedOutAt,
         guestName: schema_js_1.tickets.guestName,
+        attendeeName: schema_js_1.tickets.attendeeName,
         seatNumber: schema_js_1.tickets.seatNumber,
         tableNumber: schema_js_1.purchases.tableNumber,
         tableCapacity: schema_js_1.purchases.tableCapacity,
@@ -2366,7 +2402,51 @@ app.post("/api/admin/check-in", ...organizerOnly, asyncRoute(async (request, res
         .innerJoin(schema_js_1.events, (0, drizzle_orm_1.eq)(schema_js_1.ticketTypes.eventId, schema_js_1.events.id))
         .where((0, drizzle_orm_1.eq)(schema_js_1.tickets.tokenHash, tokenHash))
         .limit(1);
-    const found = ticket[0];
+    return ticket;
+}
+const checkInSchema = zod_1.z.object({
+    token: zod_1.z.string().min(16).max(256),
+    action: zod_1.z.enum(["CHECK_IN", "CHECK_OUT"]).default("CHECK_IN"),
+    attendeeName: zod_1.z.string().trim().min(1).max(100).transform(value => value.normalize("NFC").replace(/\s+/g, " ")),
+    nameVerified: zod_1.z.literal(true),
+});
+app.post("/api/admin/check-in/preview", ...organizerOnly, asyncRoute(async (request, response) => {
+    response.set("Cache-Control", "no-store");
+    const parsed = zod_1.z.object({ token: zod_1.z.string().min(16).max(256) }).safeParse(request.body);
+    if (!parsed.success) {
+        response.status(400).json({ error: "Invalid ticket token" });
+        return;
+    }
+    const tokenHash = (0, node_crypto_1.createHash)("sha256").update(parsed.data.token).digest("hex");
+    const { userId, role } = request.auth;
+    const found = await findTicketForScan(tokenHash);
+    if (!found || found.status !== "PAID" || (role !== "ADMIN" && found.ownerId !== userId)) {
+        response.status(404).json({ error: "Ticket not found or not paid" });
+        return;
+    }
+    if (found.tableCapacity && !found.guestName) {
+        response.status(409).json({ error: "This seat has not been assigned to a guest." });
+        return;
+    }
+    response.json({
+        event: found.event, ticketType: found.ticketType,
+        attendeeName: found.attendeeName ?? found.guestName,
+        hasAttended: found.checkedInAt !== null,
+        status: found.checkedOutAt ? "CHECKED_OUT" : found.checkedInAt ? "CHECKED_IN" : "NOT_CHECKED_IN",
+        tableNumber: found.tableNumber, seatNumber: found.seatNumber,
+    });
+}));
+app.post("/api/admin/check-in", ...organizerOnly, asyncRoute(async (request, response) => {
+    const parsed = checkInSchema.safeParse(request.body);
+    if (!parsed.success) {
+        response.status(400).json({ error: "Provide the ticket, attendee name, and confirmation that you verified the person matches that name." });
+        return;
+    }
+    const tokenHash = (0, node_crypto_1.createHash)("sha256")
+        .update(parsed.data.token)
+        .digest("hex");
+    const { userId, role } = request.auth;
+    const found = await findTicketForScan(tokenHash);
     if (!found ||
         found.status !== "PAID" ||
         (role !== "ADMIN" && found.ownerId !== userId)) {
@@ -2377,10 +2457,12 @@ app.post("/api/admin/check-in", ...organizerOnly, asyncRoute(async (request, res
         response.status(409).json({ error: "This seat has not been assigned to a guest." });
         return;
     }
-    if (found.tableCapacity && parsed.data.action === "CHECK_IN" && found.checkedInAt) {
-        response.status(409).json({ error: "This guest ticket has already been used." });
+    const recordedName = found.attendeeName ?? found.guestName;
+    if (recordedName && recordedName.normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase() !== parsed.data.attendeeName.toLowerCase()) {
+        response.status(409).json({ error: "The attendee name does not match this ticket. Only the original attendee may use it." });
         return;
     }
+    const attendeeName = recordedName ?? parsed.data.attendeeName;
     const now = new Date();
     if (!(0, check_in_status_js_1.canTransitionCheckIn)(parsed.data.action, found.checkedInAt, found.checkedOutAt)) {
         if (parsed.data.action === "CHECK_IN") {
@@ -2399,9 +2481,12 @@ app.post("/api/admin/check-in", ...organizerOnly, asyncRoute(async (request, res
         const [ticketUpdate] = await tx
             .update(schema_js_1.tickets)
             .set(parsed.data.action === "CHECK_IN"
-            ? { checkedInAt: now, checkedOutAt: null }
-            : { checkedOutAt: now })
-            .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(schema_js_1.tickets.id, found.id), (0, drizzle_orm_1.eq)(schema_js_1.tickets.tokenHash, tokenHash), found.tableCapacity && parsed.data.action === "CHECK_IN" ? (0, drizzle_orm_1.isNull)(schema_js_1.tickets.checkedInAt) : undefined, parsed.data.action === "CHECK_IN"
+            ? { checkedInAt: now, checkedOutAt: null, attendeeName }
+            : { checkedOutAt: now, attendeeName })
+            .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(schema_js_1.tickets.id, found.id), (0, drizzle_orm_1.eq)(schema_js_1.tickets.tokenHash, tokenHash), 
+        // Reject scans based on an older visit, even if an entire
+        // checkout/re-entry cycle happened since the ticket was read.
+        found.checkedInAt ? (0, drizzle_orm_1.eq)(schema_js_1.tickets.checkedInAt, found.checkedInAt) : (0, drizzle_orm_1.isNull)(schema_js_1.tickets.checkedInAt), found.checkedOutAt ? (0, drizzle_orm_1.eq)(schema_js_1.tickets.checkedOutAt, found.checkedOutAt) : (0, drizzle_orm_1.isNull)(schema_js_1.tickets.checkedOutAt), parsed.data.action === "CHECK_IN"
             ? (0, drizzle_orm_1.or)((0, drizzle_orm_1.isNull)(schema_js_1.tickets.checkedInAt), (0, drizzle_orm_1.isNotNull)(schema_js_1.tickets.checkedOutAt))
             : (0, drizzle_orm_1.and)((0, drizzle_orm_1.isNotNull)(schema_js_1.tickets.checkedInAt), (0, drizzle_orm_1.isNull)(schema_js_1.tickets.checkedOutAt))))
             .returning({ id: schema_js_1.tickets.id });
@@ -2415,6 +2500,19 @@ app.post("/api/admin/check-in", ...organizerOnly, asyncRoute(async (request, res
                 actorId: userId,
                 checkedAt: now,
             });
+        }
+        else {
+            const [visit] = await tx.update(schema_js_1.checkInLogs)
+                .set({ checkedOutAt: now, checkedOutById: userId })
+                .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(schema_js_1.checkInLogs.ticketId, found.id), (0, drizzle_orm_1.eq)(schema_js_1.checkInLogs.checkedAt, found.checkedInAt), (0, drizzle_orm_1.isNull)(schema_js_1.checkInLogs.checkedOutAt)))
+                .returning({ id: schema_js_1.checkInLogs.id });
+            if (!visit) {
+                // Older tickets may have entered before visit logging existed.
+                await tx.insert(schema_js_1.checkInLogs).values({
+                    id: (0, node_crypto_1.randomUUID)(), ticketId: found.id, eventId: found.eventId,
+                    checkedAt: found.checkedInAt, checkedOutAt: now, checkedOutById: userId,
+                });
+            }
         }
         return ticketUpdate;
     });
@@ -2431,6 +2529,7 @@ app.post("/api/admin/check-in", ...organizerOnly, asyncRoute(async (request, res
         event: found.event,
         ticketType: found.ticketType,
         guestName: found.guestName,
+        attendeeName,
         tableNumber: found.tableNumber,
         seatNumber: found.seatNumber,
         reference: found.reference,

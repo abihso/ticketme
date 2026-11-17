@@ -4,6 +4,7 @@ globalThis.fetch = async (url, init) => {
   const path = String(url);
   if (path === 'https://api.brevo.com/v3/smtp/email') {
     const message = JSON.parse(init.body);
+    if (message.to[0].email === 'disabled-key@example.test') return Response.json({ code: 'unauthorized', message: 'API Key is not enabled' }, { status: 401 });
     if (message.to[0].email === 'fail@example.test') return Response.json({ message: 'Simulated email failure' }, { status: 503 });
     require('node:fs').appendFileSync(process.env.TEST_EMAIL_LOG, JSON.stringify(message) + '\n');
     return Response.json({ messageId: 'test-email-message' }, { status: 201 });
